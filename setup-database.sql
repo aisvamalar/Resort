@@ -318,6 +318,7 @@ CREATE TABLE IF NOT EXISTS public.daily_expense_notes (
     description text NOT NULL,
     amount numeric(12,2) NOT NULL CHECK(amount > 0),
     category text NOT NULL,
+    payment_method text NOT NULL DEFAULT 'Cash' CHECK(payment_method IN ('Cash', 'UPI', 'Bank')),
     notes text NOT NULL DEFAULT '',
     converted_expense_id uuid REFERENCES public.expenses(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -369,7 +370,7 @@ BEGIN
         RETURN note_record.converted_expense_id;
     END IF;
     
-    -- Create expense from note
+    -- Create expense from note (using payment_method from note)
     INSERT INTO public.expenses(
         resort_id,
         expense_date,
@@ -384,7 +385,7 @@ BEGIN
         note_record.description,
         note_record.category,
         note_record.amount,
-        method,
+        note_record.payment_method,
         note_record.notes
     ) RETURNING id INTO expense_id;
     
