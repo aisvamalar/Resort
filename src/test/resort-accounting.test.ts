@@ -1,0 +1,36 @@
+import {describe,it,expect} from 'vitest';
+import {emptyData,summary,pending,cashSummary,advanceSuggestion,expectedCash,ownerSales,roomStatus,roomConflicts,type Reservation,type Payment,type Expense} from '@/features/resort/accounting';
+const reservation=(overrides:Partial<Reservation>={}):Reservation=>({id:'booking',resort_id:'resort',booking_date:'2026-11-22',guest_name:'Guest',booking_type:'Single Room',booking_source:'Walk-in',ota_platform:'',ota_commission_type:'Amount',ota_commission_value:0,ota_notes:'',ota_payment_status:'Pending',room_rent:10000,advance_amount:0,payment_method:'Cash',check_in_date:'2026-11-22',check_out_date:'2026-11-24',status:'Reserved',notes:'',created_at:'',updated_at:'',...overrides});
+const payment=(amount:number,method='Cash'):Payment=>({id:'receipt',resort_id:'resort',reservation_id:'booking',payment_date:'2026-11-22',amount,payment_method:method,payment_type:'Advance',notes:'',created_at:''});
+const expense=(amount:number,method='Cash'):Expense=>({id:'cost',resort_id:'resort',expense_date:'2026-11-22',expense_name:'Milk',category:'Milk & Dairy',amount,payment_method:method,notes:'',created_at:'',updated_at:''});
+describe('Resort accounting rules',()=>{
+ it('owner PDF reports OTA, website, walk-in plus reservation and total sales',()=>expect(ownerSales([reservation({id:'ota',booking_source:'OTA',room_rent:6000}),reservation({id:'web',booking_source:'Website',room_rent:3000}),reservation({id:'walk',booking_source:'Walk-in',room_rent:2000}),reservation({id:'cancel',booking_source:'OTA',room_rent:9000,status:'Cancelled'})])).toEqual({ota:6000,website:3000,walkIn:2000,total:11000}));
+ it('group rooms each show the reservation occupancy without multiplying rent',()=>{const data={...emptyData,reservations:[reservation({booking_type:'Group Room',status:'Checked In'})],roomLinks:[{id:'1',reservation_id:'booking',room_id:'101'},{id:'2',reservation_id:'booking',room_id:'102'}]};expect(roomStatus(data,'101','2026-11-22')).toBe('occupied');expect(roomStatus(data,'102','2026-11-22')).toBe('occupied');expect(ownerSales(data.reservations).total).toBe(10000);});
+ it('cancelled bookings leave the room available',()=>expect(roomStatus({...emptyData,reservations:[reservation({status:'Cancelled'})],roomLinks:[{id:'1',reservation_id:'booking',room_id:'101'}]},'101','2026-11-22')).toBe('available'));
+ it('checkout day does not occupy a room',()=>expect(roomStatus({...emptyData,reservations:[reservation({status:'Checked In'})],roomLinks:[{id:'1',reservation_id:'booking',room_id:'101'}]},'101','2026-11-24')).toBe('available'));
+ it('room sales sum non-cancelled rent, not advances',()=>expect(summary({...emptyData,reservations:[reservation(),reservation({id:'cancelled',status:'Cancelled',room_rent:6000})]}).sales).toBe(10000));
+ it('collections use actual payment transactions only',()=>expect(summary({...emptyData,reservations:[reservation()],payments:[payment(2500),payment(1500,'UPI')]}).collected).toBe(4000));
+ it('pending is rent minus actual receipts',()=>expect(pending(reservation(),[payment(2500),payment(1500)])).toBe(6000));
+ it('date-filtered booking balances still include receipts outside the report period',()=>expect(summary({...emptyData,reservations:[reservation()]},[payment(4000)]).pending).toBe(6000));
+ it('pending is never negative',()=>expect(pending(reservation(),[payment(12000)])).toBe(0));
+ it('expected cash includes reviewed opening plus cash receipts less cash expenses',()=>expect(cashSummary([payment(3000)],[expense(500)],1000).expected).toBe(3500));
+ it('UPI and Bank receipts are not physical cash',()=>expect(cashSummary([payment(1000),payment(8000,'UPI'),payment(5000,'Bank')],[]).received).toBe(1000));
+ it('OTA rent is not a receipt without a payment transaction',()=>expect(summary({...emptyData,reservations:[reservation({booking_source:'OTA',room_rent:15000})]}).cash).toBe(0));
+ it('non-cash expenses do not reduce physical cash',()=>expect(cashSummary([payment(3000)],[expense(500),expense(900,'UPI'),expense(800,'Bank')]).expected).toBe(2500));
+ it('cancelled reservations do not count as occupancy',()=>expect(summary({...emptyData,reservations:[reservation({status:'Cancelled'}),reservation({id:'active',status:'Checked In'})]}).current).toBe(1));
+ it('group rent counts once for all linked rooms',()=>expect(summary({...emptyData,reservations:[reservation({booking_type:'Group Room'})],roomLinks:[{id:'1',reservation_id:'booking',room_id:'101'},{id:'2',reservation_id:'booking',room_id:'102'}]}).sales).toBe(10000));
+ it('variance is actual minus expected',()=>expect(cashSummary([payment(3000)],[expense(500)],1000,3300).variance).toBe(-200));
+ it('dashboard cash includes the most recent reviewed opening amount',()=>expect(expectedCash({...emptyData,payments:[payment(3000)],expenses:[expense(500)],closings:[{id:'close',resort_id:'resort',closing_date:'2026-11-22',opening_cash:1000,cash_received:3000,cash_expenses:500,expected_closing_cash:3500,actual_closing_cash:3300,difference:-200,notes:'',created_at:''}]})).toBe(3500));
+ it('website advance suggestion is fifty percent of rent',()=>expect(advanceSuggestion(10000)).toBe(5000));
+});
+describe('Room overlap warnings',()=>{
+ const data={...emptyData,reservations:[reservation()],roomLinks:[{id:'1',reservation_id:'booking',room_id:'101'}]};
+ it('warns when dates overlap the same room',()=>expect(roomConflicts(data,['101'],'2026-11-23','2026-11-25')[0]?.reservation.id).toBe('booking'));
+ it('allows check-in on the previous check-out day',()=>expect(roomConflicts(data,['101'],'2026-11-24','2026-11-26')).toHaveLength(0));
+ it('ignores a different room',()=>expect(roomConflicts(data,['102'],'2026-11-22','2026-11-24')).toHaveLength(0));
+ it('ignores cancelled bookings',()=>expect(roomConflicts({...data,reservations:[reservation({status:'Cancelled'})]},['101'],'2026-11-22','2026-11-24')).toHaveLength(0));
+ it('does not flag the booking being edited',()=>expect(roomConflicts(data,['101'],'2026-11-22','2026-11-24','booking')).toHaveLength(0));
+ it('checks every room in a group booking',()=>expect(roomConflicts(data,['102','101'],'2026-11-22','2026-11-24')).toHaveLength(1));
+ it('ignores checked-out bookings',()=>expect(roomConflicts({...data,reservations:[reservation({status:'Checked Out'})]},['101'],'2026-11-22','2026-11-24')).toHaveLength(0));
+ it('allows departure on the next booking arrival day',()=>expect(roomConflicts(data,['101'],'2026-11-20','2026-11-22')).toHaveLength(0));
+});

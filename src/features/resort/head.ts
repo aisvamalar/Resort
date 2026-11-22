@@ -1,0 +1,1 @@
+export function pageHead(title:string,description:string) {return {meta:[{title:`${title} | Green Valley Resort`},{name:'description',content:description},{property:'og:title',content:`${title} | Green Valley Resort`},{property:'og:description',content:description},{property:'og:type',content:'website'},{name:'twitter:card',content:'summary_large_image'}]};}
