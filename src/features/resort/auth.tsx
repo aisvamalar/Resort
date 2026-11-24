@@ -1,24 +1,186 @@
-import {createContext,useContext,type ReactNode} from 'react';
-import type {User} from '@supabase/supabase-js';
-const AuthContext=createContext<{user:User|null;loading:boolean}>({user:null,loading:false});
-export const useOwner=()=>useContext(AuthContext);
-export function OwnerProvider({children}:{children:ReactNode}) {
-  // Authentication disabled - always return a mock user
-  const mockUser = {
-    id: 'local-user',
-    email: 'owner@resort.local',
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    app_metadata: {},
-    user_metadata: { full_name: 'Resort Owner' },
-    aud: 'authenticated',
-    role: 'authenticated'
-  } as User;
-  
-  return <AuthContext value={{user:mockUser,loading:false}}>{children}</AuthContext>;
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import type { User } from "@supabase/supabase-js";
+import { supabase } from "@/integrations/supabase/client";
+import { useRouter, Link } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
+import { Button } from "@/components/ui/button";
+import { Palmtree, ArrowLeft, LoaderCircle } from "lucide-react";
+import { toast } from "sonner";
+const AuthContext = createContext<{ user: User | null; loading: boolean }>({
+  user: null,
+  loading: true,
+});
+export const useOwner = () => useContext(AuthContext);
+export function OwnerProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+  const router = useRouter();
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    let alive = true;
+    void supabase.auth.getUser().then(({ data }) => {
+      if (alive) {
+        setUser(data.user);
+        setLoading(false);
+      }
+    });
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!["SIGNED_IN", "SIGNED_OUT", "USER_UPDATED"].includes(event)) return;
+      setUser(session?.user ?? null);
+      setLoading(false);
+      void router.invalidate();
+      if (event !== "SIGNED_OUT") void queryClient.invalidateQueries();
+      else queryClient.clear();
+    });
+    return () => {
+      alive = false;
+      subscription.unsubscribe();
+    };
+  }, [router, queryClient]);
+  return <AuthContext value={{ user, loading }}>{children}</AuthContext>;
 }
-export function AuthPage({recovery=false}:{recovery?:boolean}) {
-  // Redirect to home since auth is disabled
-  window.location.href = '/';
-  return null;
+export function AuthPage({ recovery = false }: { recovery?: boolean }) {
+  const [mode, setMode] = useState<"login" | "signup" | "forgot">("login");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [validRecovery, setValidRecovery] = useState(false);
+  const router = useRouter();
+  useEffect(() => {
+    if (recovery) {
+      const hash = new URLSearchParams(window.location.hash.slice(1));
+      setValidRecovery(hash.get("type") === "recovery");
+    }
+  }, [recovery]);
+  async function submit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setBusy(true);
+    setMessage("");
+    const f = new FormData(e.currentTarget);
+    const email = String(f.get("email") ?? "");
+    const password = String(f.get("password") ?? "");
+    try {
+      if (recovery) {
+        if (!validRecovery) throw new Error("Open the password reset link from your email.");
+        const { error } = await supabase.auth.updateUser({ password });
+        if (error) throw error;
+        toast.success("Password updated");
+        await router.navigate({ to: "/" });
+      } else if (mode === "forgot") {
+        const { error } = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo: window.location.origin + "/reset-password",
+        });
+        if (error) throw error;
+        setMessage("Check your email for a password reset link.");
+      } else if (mode === "signup") {
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            emailRedirectTo: window.location.origin,
+            data: { full_name: String(f.get("name") ?? "") },
+          },
+        });
+        if (error) throw error;
+        // Sign up complete - navigate to dashboard immediately
+        toast.success("Account created successfully");
+        await router.navigate({ to: "/" });
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        await router.navigate({ to: "/" });
+      }
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : "Unable to sign in");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="auth-page">
+      <div className="auth-box">
+        <Palmtree className="text-primary mb-5" size={32} />
+        <h1>My Resort</h1>
+        <p>
+          {recovery
+            ? "Set a new password"
+            : mode === "signup"
+              ? "Create your owner account"
+              : mode === "forgot"
+                ? "Reset your password"
+                : "Welcome back. Sign in to your resort."}
+        </p>
+        <form onSubmit={submit}>
+          {mode === "signup" && !recovery && (
+            <label className="field">
+              Full name
+              <input name="name" required autoComplete="name" />
+            </label>
+          )}
+          {!recovery && (
+            <label className="field">
+              Email address
+              <input name="email" type="email" required autoComplete="email" />
+            </label>
+          )}
+          {(mode !== "forgot" || recovery) && (
+            <label className="field">
+              {recovery ? "New password" : "Password"}
+              <input
+                name="password"
+                type="password"
+                minLength={8}
+                required
+                autoComplete={mode === "signup" || recovery ? "new-password" : "current-password"}
+              />
+            </label>
+          )}
+          {message && (
+            <div role="status" className="text-xs text-primary bg-secondary rounded-md p-3">
+              {message}
+            </div>
+          )}
+          <Button disabled={busy || (recovery && !validRecovery)} type="submit">
+            {busy && <LoaderCircle className="animate-spin" />}
+            {recovery
+              ? "Update password"
+              : mode === "signup"
+                ? "Create account"
+                : mode === "forgot"
+                  ? "Send reset link"
+                  : "Sign in"}
+          </Button>
+        </form>
+        {!recovery && (
+          <div className="flex flex-col gap-2 mt-4">
+            <Button
+              variant="link"
+              onClick={() => {
+                setMode(mode === "signup" ? "login" : "signup");
+                setMessage("");
+              }}
+            >
+              {mode === "signup" ? "Already have an account? Sign in" : "Create an owner account"}
+            </Button>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setMode(mode === "forgot" ? "login" : "forgot");
+                setMessage("");
+              }}
+            >
+              {mode === "forgot" ? "Back to sign in" : "Forgot password?"}
+            </Button>
+          </div>
+        )}
+        <Button asChild variant="link" className="mt-4">
+          <Link to="/">
+            <ArrowLeft />
+            Back to dashboard
+          </Link>
+        </Button>
+      </div>
+    </div>
+  );
 }
